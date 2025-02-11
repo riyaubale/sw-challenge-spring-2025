@@ -1,6 +1,6 @@
-import pandas as pd
 import os
 from datetime import datetime, time as datetime_time
+from collections import defaultdict
 
 class OHLCV:
     
@@ -27,22 +27,31 @@ class OHLCV:
                 
                 for file in files[i:i + 10]:
                     try:
-                        df = pd.read_csv(os.path.join(self.directory, file)) # read file & get file from directory
-                        df['Timestamp'] = pd.to_datetime(df['Timestamp'], format='%Y-%m-%d %H:%M:%S.%f') # convert to proper date & time
-                        chunk.append(df) # add data
-                        
+                        with open(os.path.join(self.directory, file), 'r') as f:
+                            next(f) # don't include the header
+                            for line in f:
+                                # split based on variables
+                                try:
+                                    timestamp_str, price_str, size_str = line.strip().split(',')
+                                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f') # convert to proper date & time
+                                    
+                                    # add data
+                                    chunk.append({
+                                        'Timestamp': timestamp,
+                                        'Price': float(price_str),
+                                        'Size': float(size_str)
+                                    })
+                                except:
+                                    continue
+                                
                     except Exception as e:
-                        print(f"ERROR: Loading {file}: {e}") # prints exception if file didn't load correctly
+                        print(f"ERROR: Loading {file}: {e}")
                 
                 if chunk:
-                    data.append(pd.concat(chunk, ignore_index=True)) # combine all chunks, prevents duplicates
+                    data.extend(chunk) # combine all chunks
                     del chunk # delete the temporary data
             
-            if data:
-                # if data isn't empty, return
-                return pd.concat(data, ignore_index=True)
-            else:
-                return None
+            return data if data else None
             
         except Exception as e:
             print(f"ERROR: Can't access directory: {e}")
@@ -50,8 +59,16 @@ class OHLCV:
 
     # Cleans the data
     def clean_data(self, data):
-        # makes sure price & size is above 0, timestamp is unique and not duplicated, and all values are valid (not missing)
-        return data[(data['Price'] > 0) & (data['Size'] > 0) & ~data['Timestamp'].duplicated(keep='first')].dropna()
+        visited = set()
+        clean = []
+        
+        for row in data:
+            # price is greater than 0, size is greater than 0, no duplicate timestamps, no missing values
+            if (row['Price'] > 0 and row['Size'] > 0 and row['Timestamp'] not in visited and all(value is not None for value in row.values())):
+                visited.add(row['Timestamp'])
+                clean.append(row)
+        
+        return sorted(clean, key=lambda x: x['Timestamp'])
 
     # Checks if the user input for date and time is valid
     def valid_date(self, text):
@@ -62,16 +79,16 @@ class OHLCV:
                 
                 # check format, date & time should be able to be split into 3 components
                 try:
-                    if len(date.split('/')) != 3 or len(time.split(':')) != 3:
+                    if len(date.split('/')) != 3 or len(time.split(':')) != 3: 
                         raise ValueError("Please use mm/dd/yyyy and hh:mm:ss")
                 except ValueError as e:
                     print(f"Error: {str(e)}")
                     continue
                 
                 hours, minutes, seconds = map(int, time.split(':')) # splits time into h, m, s
-                input_time = datetime_time(hours, minutes, seconds) # creates time object
+                input_time = datetime_time(hours, minutes, seconds)  # creates time object
                 
-                # check if time interval is within market hours
+                 # check if time interval is within market hours
                 if not (datetime_time(9, 30) <= input_time <= datetime_time(16, 0)):
                     print("Time must be within market hours (9:30 AM and 4:00 PM).")
                     continue
@@ -104,35 +121,35 @@ class OHLCV:
                     12: 31    # December
                 }
                 
-                # if day is more than given day. already check for less than given day 
+                 # if day is more than given day. already check for less than given day 
                 try:
                     if day > days_in_month[month]:
                         raise ValueError(f"Invalid day. {month} has {days_in_month[month]} days.")
                 except ValueError as e:
                     print(f"ERROR: {str(e)}")
                 
-                return datetime.strptime(f"{date} {time}.000000", '%m/%d/%Y %H:%M:%S.%f') # returns date in timestamp format
+                return datetime.strptime(f"{date} {time}.000000", '%m/%d/%Y %H:%M:%S.%f')  # returns date in timestamp format
                 
             except ValueError as e:
                 print("Invalid format. Please use mm/dd/yyyy and hh:mm:ss.")
 
     # Parses the time interval input 
     def time_interval(self, text):
-        units = {'d': 86400, 'h': 3600, 'm': 60, 's': 1} # days, hours, months, seconds, in seconds
+        units = {'d': 86400, 'h': 3600, 'm': 60, 's': 1}
         
         while True:
             try:
-                time = input("Please enter a time interval: ").lower() # convert to lowercase
+                time = input("Please enter a time interval: ").lower()  # convert to lowercase
                 total = 0 # total seconds
-                current = '' # temporary string to concatenate digits to form full numbesr
+                current = '' # temporary string to concatenate digits to form full number
                 
                 for char in time:
                     if char.isdigit():
-                        current += char # concatenates digit
+                        current += char  # concatenates digit
                     elif char in units:
                         if not current:
                             raise ValueError("There is no number before the unit.")
-                        total += int(current) * units[char] # add time to total
+                        total += int(current) * units[char]  # add time to total
                         current = '' # reset temporary string
                     else:
                         raise ValueError("Invalid character.")
@@ -145,27 +162,47 @@ class OHLCV:
             except ValueError as e:
                 print(f"ERROR: {e}")
 
-    # Creats the OHLCV bars and exports it to csv
+    # Find the start of a time interval
+    def start_int(self, timestamp, interval_seconds):
+        time = int(timestamp.timestamp())
+        return datetime.fromtimestamp(time - (time % interval_seconds))
+
+    # Creates the OHLCV bars and exports it to csv
     def ohlcv_bars(self, data, interval_seconds, start, end):
-        # filters data for timestamps between start & end & sorts by timestamp
-        interval_data = data[(data['Timestamp'] >= start) & (data['Timestamp'] <= end)].sort_values('Timestamp')
+        # filters data for timestamps between start & end
+        interval_data = [row for row in data if start <= row['Timestamp'] <= end]
         
-        # if no data
-        if interval_data.empty:
-            print("No data in interaval")
+         # if no data
+        if not interval_data:
+            print("No data in interval")
             return None
         
-        # create data frame for ohlcv bars
-        # Grouper - groups time series data into intervals, and then does operation on it after
-        ohlcv = pd.DataFrame()
-        ohlcv['Open Price'] = interval_data.groupby(pd.Grouper(key='Timestamp', freq=f'{interval_seconds}s'))['Price'].first()
-        ohlcv['High Price'] = interval_data.groupby(pd.Grouper(key='Timestamp', freq=f'{interval_seconds}s'))['Price'].max()
-        ohlcv['Low Price'] = interval_data.groupby(pd.Grouper(key='Timestamp', freq=f'{interval_seconds}s'))['Price'].min()
-        ohlcv['Close Price'] = interval_data.groupby(pd.Grouper(key='Timestamp', freq=f'{interval_seconds}s'))['Price'].last()
-        ohlcv['Volume'] = interval_data.groupby(pd.Grouper(key='Timestamp', freq=f'{interval_seconds}s'))['Size'].sum()
+        # create bars
+        bars = defaultdict(lambda: {'open': None, 'high': float('-inf'), 
+                                  'low': float('inf'), 'close': None, 'volume': 0})
         
-        ohlcv = ohlcv.dropna() # remove invalid bars
-        ohlcv.to_csv('ohlcv_bars.csv') # move data to csv file
+        # process each tick
+        for row in sorted(interval_data, key=lambda x: x['Timestamp']):
+            interval_start = self.start_int(row['Timestamp'], interval_seconds)
+            bar = bars[interval_start]
+            
+            # Update bar data
+            if bar['open'] is None:
+                bar['open'] = row['Price']
+            bar['high'] = max(bar['high'], row['Price'])
+            bar['low'] = min(bar['low'], row['Price'])
+            bar['close'] = row['Price']
+            bar['volume'] += row['Size']
+        
+        # move data to csv file
+        with open('ohlcv_bars.csv', 'w') as f:
+            f.write('Timestamp,Open Price,High Price,Low Price,Close Price,Volume\n')
+            for timestamp in sorted(bars.keys()):
+                bar = bars[timestamp]
+                if None not in (bar['open'], bar['high'], bar['low'], bar['close']):
+                    f.write(f"{timestamp},{bar['open']},{bar['high']},"
+                           f"{bar['low']},{bar['close']},{bar['volume']}\n")
+
 
 
 
@@ -180,7 +217,7 @@ if __name__ == "__main__":
         print("\nWe will need two time ranges to create the OHLCV bars.")
         date1 = loader.valid_date("Enter first date (mm/dd/yyyy): ")
         date2 = loader.valid_date("Enter second date (mm/dd/yyyy): ")
-        time_int = loader.time_interval("Enter time (hh:mm:ss): ")
+        time_int = loader.time_interval("Enter time interval: ")
         
         # creating the ohlcv bars
         bars = loader.ohlcv_bars(data, time_int, min(date1, date2), max(date1, date2))
